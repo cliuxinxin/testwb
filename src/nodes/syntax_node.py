@@ -19,8 +19,6 @@ def check_syntax(state: AlphaState) -> dict:
     if re.search(r'\d[eE][+-]?\d', expression):
         error_msgs.append("绝对禁止使用科学计数法 (如 1e-5)，请使用完整小数。")
         
-    if re.search(r'\b(and|or|if|else)\b', expression, re.IGNORECASE):
-        error_msgs.append("绝对禁止使用 'and', 'or', 'if' 等Python关键字。")
         
     if re.search(r',\s*[A-Za-z]\s*\)', expression):
         error_msgs.append("周期参数不能是抽象字母（如 N, M），必须是具体整数。")
