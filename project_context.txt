@@ -1,0 +1,936 @@
+文件位置：login_get_cookie.py
+文件内容：
+```python
+from playwright.sync_api import sync_playwright
+import time
+
+
+def login_and_save_cookie():
+    print("启动浏览器，请在弹出的窗口中手动登录 WorldQuant Brain...")
+    with sync_playwright() as p:
+        # 必须是 headless=False，让你自己输入账号密码或二次验证
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context()
+        page = context.new_page()
+
+        page.goto("https://platform.worldquantbrain.com/sign-in")
+
+        print("等待登录完成 (等待 URL 变成主页，你有 120 秒时间)...")
+        # 登录成功，保存全部 Cookie 等会话状态
+        page.wait_for_url("**/simulate**", timeout=120000)
+
+        context.storage_state(path="wq_cookies.json")
+        print(
+            "✅ 成功提取 Cookie！已保存为 wq_cookies.json。你现在可以启动自动化系统了。"
+        )
+        browser.close()
+
+
+if __name__ == "__main__":
+    login_and_save_cookie()
+
+```
+--------------------------------------------------
+
+文件位置：webui.py
+文件内容：
+```python
+import streamlit as st
+import os
+import time
+from src.graph import build_graph
+from src.state import AlphaState
+
+# ==========================================
+# 1. 页面配置与状态初始化
+# ==========================================
+st.set_page_config(page_title="WQ Alpha 自动化挖掘系统", page_icon="📈", layout="wide")
+
+if "alpha_history" not in st.session_state:
+    st.session_state.alpha_history = []
+if "is_running" not in st.session_state:
+    st.session_state.is_running = False
+
+# ==========================================
+# 2. 侧边栏：环境配置 (支持 UI 动态修改)
+# ==========================================
+with st.sidebar:
+    st.title("⚙️ 系统配置")
+
+    # 动态覆盖环境变量，这样底层 src/llm.py 就能动态读取了
+    api_base = st.text_input(
+        "API Base URL", value=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    )
+    api_key = st.text_input(
+        "API Key", value=os.getenv("OPENAI_API_KEY", ""), type="password"
+    )
+    model = st.text_input("LLM Model", value=os.getenv("LLM_MODEL", "gpt-4o"))
+    max_iter = st.number_input(
+        "最大迭代次数",
+        min_value=1,
+        max_value=10,
+        value=int(os.getenv("MAX_ITERATIONS", 4)),
+    )
+
+    os.environ["OPENAI_API_BASE"] = api_base
+    os.environ["OPENAI_API_KEY"] = api_key
+    os.environ["LLM_MODEL"] = model
+    os.environ["MAX_ITERATIONS"] = str(max_iter)
+
+    st.markdown("---")
+    st.markdown("### 🛠️ 调试面板")
+    start_btn = st.button(
+        "🚀 启动单次因子挖掘", use_container_width=True, type="primary"
+    )
+
+# ==========================================
+# 3. 主界面布局
+# ==========================================
+st.title("🤖 WorldQuant Brain 自动化因子挖掘")
+st.markdown("基于 LangGraph 编排的 `生成 -> 回测 -> 评估 -> 迭代` 闭环系统。")
+
+# 创建 Tab 页面
+tab_monitor, tab_history = st.tabs(["👁️ 实时监控面板", "📚 成功因子库"])
+
+with tab_monitor:
+    # 占位符定义，用于流式更新内容
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        st.subheader("💡 因子逻辑 (Idea)")
+        idea_placeholder = st.empty()
+        st.subheader("💻 当前表达式 (Expression)")
+        code_placeholder = st.empty()
+        st.subheader("🔄 迭代状态")
+        status_placeholder = st.empty()
+    with col2:
+        st.subheader("📊 回测指标 (Simulation)")
+        metrics_placeholder = st.empty()
+        st.subheader("⚖️ 评估建议 (Feedback)")
+        feedback_placeholder = st.empty()
+    st.markdown("---")
+    st.subheader("📜 节点流转日志 (LangGraph Trace)")
+    log_placeholder = st.empty()
+
+# ==========================================
+# 4. 核心逻辑：触发与流式渲染
+# ==========================================
+if start_btn:
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("请在左侧栏输入 API Key！")
+        st.stop()
+
+    # 清空占位符并重置状态
+    idea_placeholder.info("等待生成...")
+    code_placeholder.code("# 等待生成...")
+    metrics_placeholder.info("等待回测...")
+    feedback_placeholder.info("等待评估...")
+    log_text = ""
+    log_placeholder.code("系统启动...\n", language="text")
+
+    # 编译 LangGraph
+    app = build_graph()
+    initial_state = {"iteration_count": 0, "status": "new"}
+
+    st.session_state.is_running = True
+
+    # 使用 Streamlit 的进度 Spinner 罩住整个运行过程
+    with st.spinner("🤖 自动化因子挖掘流水线运行中..."):
+        try:
+            # LangGraph 流式执行
+            for output in app.stream(initial_state):
+                for node_name, state_update in output.items():
+                    # 1. 记录日志
+                    log_text += (
+                        f"[{time.strftime('%H:%M:%S')}] 节点 [{node_name}] 执行完毕。\n"
+                    )
+                    log_placeholder.code(log_text, language="text")
+
+                    # 2. 实时更新 UI 状态
+                    if "idea" in state_update:
+                        idea_placeholder.success(state_update["idea"])
+
+                    if "expression" in state_update:
+                        code_placeholder.code(
+                            state_update["expression"], language="python"
+                        )
+
+                    if "iteration_count" in state_update:
+                        status_placeholder.metric(
+                            "当前迭代次数", state_update["iteration_count"]
+                        )
+
+                    if (
+                        "simulation_results" in state_update
+                        and state_update["simulation_results"]
+                    ):
+                        res = state_update["simulation_results"]
+                        m1, m2, m3 = metrics_placeholder.columns(3)
+                        m1.metric("Sharpe", res.get("sharpe", 0))
+                        m2.metric("Turnover", res.get("turnover", 0))
+                        m3.metric("Fitness", res.get("fitness", 0))
+                    elif node_name == "simulator" and state_update.get("error_msg"):
+                        metrics_placeholder.error(
+                            f"❌ 平台报错: {state_update['error_msg']}"
+                        )
+
+                    if "feedback" in state_update and state_update["feedback"]:
+                        if state_update.get("status") == "passed":
+                            feedback_placeholder.success(state_update["feedback"])
+                        elif state_update.get("status") == "error":
+                            feedback_placeholder.error(state_update["feedback"])
+                        else:
+                            feedback_placeholder.warning(state_update["feedback"])
+
+                    # 3. 提交成功，写入历史库
+                    if node_name == "submitter":
+                        st.session_state.alpha_history.append(
+                            {
+                                "idea": state_update.get("idea", "未知逻辑"),
+                                "expression": state_update.get("expression", ""),
+                                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
+                        st.balloons()  # 放气球庆祝
+
+                    time.sleep(0.5)  # 给 UI 一点渲染的缓冲时间
+
+        except Exception as e:
+            st.error(f"运行发生异常: {str(e)}")
+
+    st.session_state.is_running = False
+
+# ==========================================
+# 5. 渲染历史提交页面
+# ==========================================
+with tab_history:
+    st.subheader("🏆 成功提交的 Alpha 记录")
+    if not st.session_state.alpha_history:
+        st.info("暂无成功提交的因子。快去挖掘吧！")
+    else:
+        for idx, item in enumerate(reversed(st.session_state.alpha_history)):
+            with st.expander(
+                f"Alpha #{len(st.session_state.alpha_history) - idx} | {item['time']}"
+            ):
+                st.markdown(f"**逻辑**: {item['idea']}")
+                st.code(item["expression"], language="python")
+
+```
+--------------------------------------------------
+
+文件位置：main.py
+文件内容：
+```python
+import time
+from src.logger import logger
+from src.graph import build_graph
+
+
+def main():
+    logger.info("=" * 50)
+    logger.info("🤖 WorldQuant Brain 自动化因子挖掘系统启动")
+    logger.info("=" * 50)
+
+    app = build_graph()
+
+    initial_state = {"iteration_count": 0, "status": "new"}
+
+    logger.info("▶️ 开始单次挖掘任务流...")
+    start_time = time.time()
+
+    try:
+        for output in app.stream(initial_state):
+            for node_name, state_update in output.items():
+                logger.debug(f"--- 节点 [{node_name}] 执行完毕 ---")
+    except Exception as e:
+        logger.error(f"工作流执行中发生致命错误: {str(e)}", exc_info=True)
+
+    elapsed = time.time() - start_time
+    logger.info(f"⏹️ 任务流结束。总耗时: {elapsed:.2f} 秒。")
+
+
+if __name__ == "__main__":
+    main()
+
+```
+--------------------------------------------------
+
+文件位置：src/db.py
+文件内容：
+```python
+import sqlite3
+import os
+from src.logger import logger
+
+DB_PATH = "alphas.db"
+
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # 创建基因库表
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS alpha_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            expression TEXT UNIQUE,
+            idea TEXT,
+            sharpe REAL,
+            turnover REAL,
+            fitness REAL,
+            status TEXT,       -- 'passed' 或 'near_miss'
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+    logger.debug("本地 SQLite 基因库初始化完成。")
+
+
+def save_alpha(expression, idea, sharpe, turnover, fitness, status):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT OR IGNORE INTO alpha_memory (expression, idea, sharpe, turnover, fitness, status)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """,
+            (expression, idea, sharpe, turnover, fitness, status),
+        )
+        conn.commit()
+        conn.close()
+        logger.debug(f"成功将因子存入基因库: {expression} | 状态: {status}")
+    except Exception as e:
+        logger.error(f"存入数据库失败: {e}")
+
+
+def get_random_near_miss():
+    """随机获取一个表现尚可的因子用于变异"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT expression, idea, sharpe FROM alpha_memory WHERE status='near_miss' ORDER BY RANDOM() LIMIT 1"
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"expression": row[0], "idea": row[1], "sharpe": row[2]}
+    return None
+
+
+# 初始化调用
+init_db()
+
+```
+--------------------------------------------------
+
+文件位置：src/config.py
+文件内容：
+```python
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env if present
+load_dotenv()
+
+# 读取配置，提供默认值防止崩溃
+OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o")
+MAX_ITERATIONS = int(os.getenv("MAX_ITERATIONS", 4))
+
+```
+--------------------------------------------------
+
+文件位置：src/whitelist.py
+文件内容：
+```python
+# src/whitelist.py
+
+# 确保这些是你当前账号真正解锁了的算子
+ALLOWED_OPERATORS =[
+    "rank", 
+    "ts_mean", 
+    "ts_corr", 
+    "delay", 
+    "delta", 
+    "ts_rank", 
+    "stddev", 
+    "abs", 
+    "log", 
+    "sign",
+    "group_neutralize"
+]
+
+# 确保这些是你当前账号可用的数据字段
+ALLOWED_DATASETS =[
+    "close", 
+    "open", 
+    "high", 
+    "low", 
+    "volume", 
+    "vwap"
+]
+
+# 组装成一个全集，供本地语法检查器使用
+WQ_WHITELIST = set(ALLOWED_OPERATORS + ALLOWED_DATASETS)
+```
+--------------------------------------------------
+
+文件位置：src/graph.py
+文件内容：
+```python
+from langgraph.graph import StateGraph, END
+from src.state import AlphaState
+from src.config import MAX_ITERATIONS
+from src.logger import logger
+from src.nodes.idea_node import generate_idea
+from src.nodes.coder_node import write_expression
+from src.nodes.sim_node import run_simulation
+from src.nodes.eval_node import evaluate_results
+from src.nodes.submit_node import submit_alpha
+
+
+def build_graph():
+    logger.debug("正在编排 LangGraph 工作流拓扑结构...")
+    workflow = StateGraph(AlphaState)
+
+    # 1. 注册节点
+    workflow.add_node("idea", generate_idea)
+    workflow.add_node("coder", write_expression)
+    workflow.add_node("simulator", run_simulation)
+    workflow.add_node("evaluator", evaluate_results)
+    workflow.add_node("submitter", submit_alpha)
+
+    # 2. 定义条件路由函数
+    def evaluate_router(state: AlphaState) -> str:
+        current_iter = state.get("iteration_count", 0)
+        status = state.get("status")
+
+        logger.debug(
+            f"[Router] 当前状态: {status}, 迭代次数: {current_iter}/{MAX_ITERATIONS}"
+        )
+
+        if current_iter >= MAX_ITERATIONS:
+            logger.warning(
+                f"[Router] 达到最大迭代次数 {MAX_ITERATIONS}，放弃此因子的抢救，流程结束。"
+            )
+            return "end"
+
+        if status in ["error", "failed"]:
+            return "coder"  # 回去改代码
+
+        if status == "passed":
+            return "submitter"  # 去提交
+
+        return "end"  # 兜底逻辑
+
+    # 3. 连接普通边
+    workflow.set_entry_point("idea")
+    workflow.add_edge("idea", "coder")
+    workflow.add_edge("coder", "simulator")
+    workflow.add_edge("simulator", "evaluator")
+
+    # 4. 连接条件边
+    workflow.add_conditional_edges(
+        "evaluator",
+        evaluate_router,
+        {"coder": "coder", "submitter": "submitter", "end": END},
+    )
+    workflow.add_edge("submitter", END)
+
+    logger.debug("LangGraph 编译完成。")
+    return workflow.compile()
+
+```
+--------------------------------------------------
+
+文件位置：src/__init__.py
+文件内容：
+```python
+"""Core package"""
+
+```
+--------------------------------------------------
+
+文件位置：src/llm.py
+文件内容：
+```python
+import os
+from langchain_openai import ChatOpenAI
+from src.logger import logger
+
+
+def get_llm(temperature=0.7) -> ChatOpenAI:
+    # 动态从环境变量中获取（配合 Streamlit/外部控制面板）
+    api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    model = os.getenv("LLM_MODEL", "gpt-4o")
+
+    logger.debug(f"初始化 LLM 客户端: Model={model}, Base={api_base}")
+    return ChatOpenAI(
+        api_key=api_key, base_url=api_base, model=model, temperature=temperature
+    )
+
+```
+--------------------------------------------------
+
+文件位置：src/logger.py
+文件内容：
+```python
+import logging
+import os
+from datetime import datetime
+
+
+def setup_logger():
+    # 确保日志目录存在
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+    # 日志文件名按天生成
+    log_file = os.path.join(
+        log_dir, f"wq_bot_{datetime.now().strftime('%Y-%m-%d')}.log"
+    )
+
+    # 创建全局 Logger
+    logger = logging.getLogger("WQ_BOT")
+    logger.setLevel(logging.DEBUG)  # 捕获 DEBUG 及以上所有级别日志
+
+    # 避免重复添加 Handler
+    if not logger.handlers:
+        # 1. 终端输出 Handler (输出 INFO 及以上，格式简洁)
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_formatter = logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(message)s", datefmt="%H:%M:%S"
+        )
+        console_handler.setFormatter(console_formatter)
+
+        # 2. 文件输出 Handler (输出 DEBUG 及以上，格式详尽)
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_formatter = logging.Formatter(
+            "%(asctime)s [%(levelname)s][%(filename)s:%(lineno)d] - %(message)s"
+        )
+        file_handler.setFormatter(file_formatter)
+
+        logger.addHandler(console_handler)
+        logger.addHandler(file_handler)
+
+    return logger
+
+
+# 实例化全局可用的 logger
+logger = setup_logger()
+
+```
+--------------------------------------------------
+
+文件位置：src/state.py
+文件内容：
+```python
+from typing import TypedDict, Optional, Dict, Any
+
+
+class AlphaState(TypedDict):
+    idea: str  # 因子逻辑思路
+    expression: str  # WQ 表达式代码
+    simulation_results: Dict[str, Any]  # 回测结果 (Sharpe, Turnover等)
+    error_msg: Optional[str]  # WQ 平台报错信息
+    iteration_count: int  # 迭代次数
+    status: str  # new, simulated, passed, failed, error
+    feedback: str  # Evaluator 针对修改给出的建议
+
+```
+--------------------------------------------------
+
+文件位置：src/nodes/eval_node.py
+文件内容：
+```python
+# src/nodes/eval_node.py
+from src.state import AlphaState
+from src.logger import logger
+
+def evaluate_results(state: AlphaState) -> dict:
+    logger.info("⚖️ [Node: Evaluator] 正在根据 WQ 官方反馈评估结果...")
+    iteration = state.get("iteration_count", 0) + 1
+    
+    # 1. 致命错误：代码根本没跑通（比如算子不认识、语法错误）
+    if state["status"] == "error":
+        real_error = state.get('error_msg', '未知错误')
+        feedback_msg = f"平台直接拒绝了代码！报错内容：【{real_error}】。请仔细阅读，如果是 operator unknown，说明没权限使用该算子，请用其他公式替代！"
+        logger.warning(f"⚖️ 打回原因: {feedback_msg}")
+        return {"status": "error", "iteration_count": iteration, "feedback": feedback_msg}
+
+    # 读取刚才扒下来的数据
+    res = state.get("simulation_results", {})
+    sharpe = res.get("sharpe", 0.0)
+    fail_reasons = res.get("fail_reasons",[])
+    
+    # 2. 完美通关：如果没有抓取到任何 FAIL 理由，且夏普率不是 0
+    # (WQ 有时候会把通过的条件放宽，只要没有红色的 FAIL 就算过)
+    if not fail_reasons and sharpe >= 1.25:
+        logger.info("⚖️ ✅ 官方 0 FAIL！指标全部达标，准备提交！")
+        return {"status": "passed", "iteration_count": iteration, "feedback": "表现极佳，完美通过 WQ 官方所有测试！"}
+
+    # 3. 官方拒签：有 FAIL 理由，我们把官方英文和专家建议结合，喂给 AI
+    feedback_parts =[
+        f"回测完成，当前夏普率: {sharpe}。但未通过 WQ 官方测试！以下是官方的【FAIL 拒签理由】(请仔细阅读)：",
+        *["- " + reason for reason in fail_reasons],
+        "\n【量化专家修改建议】:"
+    ]
+    
+    # 针对官方的不同报错，给 AI 补充具体的修改方向
+    added_advice = False
+    for reason in fail_reasons:
+        if "Sharpe" in reason and "below cutoff" in reason:
+            feedback_parts.append("👉 夏普率太低: 尝试增加横向截面 rank() 操作，或者结合不同逻辑的数据。")
+            added_advice = True
+        elif "Turnover" in reason and "above cutoff" in reason:
+            feedback_parts.append("👉 换手率超标: 请务必在表达式最外层使用 ts_mean(..., 5) 或者 ts_rank 进行平滑，降低交易频率！")
+            added_advice = True
+        elif "Fitness" in reason:
+            feedback_parts.append("👉 Fitness不达标: 因子表现不够稳定，尝试改变计算周期（例如 5 改 20）。")
+            added_advice = True
+            
+    if not added_advice:
+         feedback_parts.append("👉 请根据上述英文报错，重新调整数学表达式。")
+
+    feedback_msg = "\n".join(feedback_parts)
+    
+    logger.info(f"⚖️ 🔄 官方拒签，打回重做。发现 {len(fail_reasons)} 个未达标项。")
+    logger.debug(f"传给 Coder 的反馈: \n{feedback_msg}")
+    
+    return {"status": "failed", "iteration_count": iteration, "feedback": feedback_msg}
+```
+--------------------------------------------------
+
+文件位置：src/nodes/coder_node.py
+文件内容：
+```python
+# src/nodes/coder_node.py
+from src.state import AlphaState
+from src.llm import get_llm
+from src.logger import logger
+from src.whitelist import ALLOWED_OPERATORS, ALLOWED_DATASETS
+
+def write_expression(state: AlphaState) -> dict:
+    iteration = state.get('iteration_count', 0)
+    logger.info(f"💻 [Node: Coder] 正在编写/修复 WQ 表达式 (迭代: {iteration})...")
+    
+    llm = get_llm(temperature=0.1)
+    idea = state.get("idea", "")
+    feedback = state.get("feedback", "")
+    
+    # 动态将列表转为字符串
+    ops_str = ", ".join(ALLOWED_OPERATORS)
+    data_str = ", ".join(ALLOWED_DATASETS)
+    
+    prompt = f"""将以下因子逻辑写成 WorldQuant Brain 的单行表达式。
+【因子逻辑】: {idea}
+
+【极度严格的约束（违反任何一条直接淘汰）】:
+1. 只能使用以下基础数据: {data_str}
+2. 只能使用以下算子: {ops_str}
+3. 【绝对禁止】使用 Python 的 `and`, `or`, `if` 等关键字！如果需要多条件叠加，请用加减乘除。
+4. 【绝对禁止】使用抽象变量名（如 N, M, d）！计算周期必须是具体整数（如 5, 10, 20）。
+5. 【绝对禁止】使用科学计数法（如 1e-5），必须直接写完整小数（如 0.00001）。
+6. 不要加 Markdown 标记，直接输出一行纯净的代码。"""
+
+    if feedback:
+        prompt += f"\n\n【前期测试反馈与报错】: \n{feedback}\n请仔细分析报错原因，严格遵守约束条件，修复此错误！"
+
+    response = llm.invoke(prompt)
+    expression = response.content.strip().replace("`", "")
+    
+    logger.info(f"💻[Node: Coder] 生成表达式: {expression}")
+    return {"expression": expression}
+```
+--------------------------------------------------
+
+文件位置：src/nodes/syntax_node.py
+文件内容：
+```python
+# src/nodes/syntax_node.py
+import re
+from src.state import AlphaState
+from src.logger import logger
+from src.whitelist import WQ_WHITELIST
+
+def check_syntax(state: AlphaState) -> dict:
+    expression = state.get("expression", "")
+    logger.info(f"🔎 [Node: Syntax] 本地静态查错中...")
+    error_msgs =[]
+    
+    if expression.count('(') != expression.count(')'):
+        error_msgs.append("括号不匹配 (Unbalanced parentheses)。")
+        
+    if re.search(r'\d[eE][+-]?\d', expression):
+        error_msgs.append("绝对禁止使用科学计数法 (如 1e-5)，请使用完整小数。")
+        
+    if re.search(r'\b(and|or|if|else)\b', expression, re.IGNORECASE):
+        error_msgs.append("绝对禁止使用 'and', 'or', 'if' 等Python关键字。")
+        
+    if re.search(r',\s*[A-Za-z]\s*\)', expression):
+        error_msgs.append("周期参数不能是抽象字母（如 N, M），必须是具体整数。")
+
+    words = re.findall(r'[a-zA-Z_]\w*', expression)
+    invalid_words = [w for w in words if w.lower() not in WQ_WHITELIST]
+    if invalid_words:
+        error_msgs.append(f"使用了未授权的算子/数据集: {', '.join(invalid_words)}。请严格从白名单中选取。")
+
+    if error_msgs:
+        full_error = " ".join(error_msgs)
+        logger.warning(f"🔎[Node: Syntax] 拦截到致命错误: {full_error}")
+        return {"status": "syntax_error", "error_msg": full_error}
+    
+    logger.info("🔎[Node: Syntax] ✅ 本地语法检查完美通过。")
+    return {"status": "syntax_passed", "error_msg": None}
+```
+--------------------------------------------------
+
+文件位置：src/nodes/__init__.py
+文件内容：
+```python
+"""Node modules package"""
+
+```
+--------------------------------------------------
+
+文件位置：src/nodes/sim_node.py
+文件内容：
+```python
+# src/nodes/sim_node.py
+import time
+import os
+import sys
+import re
+from playwright.sync_api import sync_playwright
+from src.state import AlphaState
+from src.logger import logger
+
+COOKIE_PATH = "wq_cookies.json"
+
+# ==========================================================
+# 💡 全局单例：浏览器管家 (实现浏览器复用，不重复开关)
+# ==========================================================
+class BrowserManager:
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+
+    def get_page(self):
+        if self.page is None:
+            logger.info("🚀 首次启动常驻浏览器...")
+            self.playwright = sync_playwright().start()
+            self.browser = self.playwright.chromium.launch(headless=False, args=["--start-maximized"])
+            self.context = self.browser.new_context(
+                storage_state=COOKIE_PATH, viewport={"width": 1920, "height": 1080}
+            )
+            self.page = self.context.new_page()
+            
+            logger.debug("正在打开 WQ 模拟页...")
+            self.page.goto("https://platform.worldquantbrain.com/simulate", timeout=60000)
+            self.page.wait_for_load_state("networkidle")
+            time.sleep(3)
+        return self.page
+
+browser_manager = BrowserManager()
+
+def close_annoying_popups(page):
+    selectors =[
+        "text='Accept All'", "text='Skip'", "text='Got it'", 
+        "text='Close'", ".introjs-skipbutton", ".modal-close-button"
+    ]
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=500):
+                loc.click()
+                time.sleep(0.5)
+        except:
+            pass
+
+def run_simulation(state: AlphaState) -> dict:
+    expression = state.get("expression")
+    logger.info(f"⚙️ [Node: Simulator] 准备在常驻浏览器中执行回测...")
+
+    if not os.path.exists(COOKIE_PATH):
+        return {"status": "error", "error_msg": "Missing wq_cookies.json", "simulation_results": {}}
+
+    try:
+        page = browser_manager.get_page()
+        close_annoying_popups(page)
+
+        # 点击输入框
+        try:
+            page.click(".monaco-editor", timeout=3000)
+        except:
+            page.mouse.click(500, 300)
+
+        # 填入代码，并使用防冻结空格技巧
+        page.keyboard.press("Meta+A" if os.name == "posix" and sys.platform == "darwin" else "Control+A")
+        page.keyboard.press("Backspace")
+        time.sleep(0.5) 
+        page.keyboard.insert_text(expression)
+        page.keyboard.press("Space")
+        page.keyboard.press("Backspace")
+        time.sleep(1)
+
+        # 点击回测按钮
+        try:
+            page.click("button:has-text('Simulate'), button:has-text('SIMULATE')", timeout=10000)
+        except:
+            return {"error_msg": "表达式严重错误，WQ按钮被禁用。", "status": "error", "simulation_results": {}}
+
+        logger.info("⚙️ 开启智能监控 (等待进度条)...")
+        time.sleep(3) 
+        
+        # 轮询监控报错或完成标志
+        max_wait_seconds = 90
+        poll_interval = 2
+        for i in range(max_wait_seconds // poll_interval):
+            # 1. 抓报错红条
+            error_locator = page.locator("text=/Unexpected|Error|Invalid|Attempted|unknown|inaccessible|Syntax/i").first
+            if error_locator.is_visible():
+                error_text = error_locator.inner_text()
+                logger.warning(f"⚙️ 抓取到网页红条报错: {error_text}")
+                return {"error_msg": f"平台运行错误: {error_text}", "status": "error", "simulation_results": {}}
+            
+            # 2. 抓真正的成功标志：出现 IS Summary，或者 Show test period 按钮
+            success_locator = page.locator("text='IS Summary'").first
+            hidden_btn = page.locator("button:has-text('Show test period')").first
+            
+            if success_locator.is_visible() or hidden_btn.is_visible():
+                logger.info("⚙️ 侦测到 IS Summary 生成，回测完成！")
+                break 
+                
+            time.sleep(poll_interval)
+        else:
+            logger.error("⚙️ 等待回测结果超时！")
+            return {"error_msg": "等待回测结果超时", "status": "error", "simulation_results": {}}
+
+        # ==========================================================
+        # 💡 解开折叠与数据盲抓
+        # ==========================================================
+        hidden_btn = page.locator("button:has-text('Show test period')").first
+        if hidden_btn.is_visible():
+            logger.info("🔍 发现数据被隐藏，正在自动点击展开...")
+            hidden_btn.click()
+            time.sleep(2) # 必须等待动画展开完毕
+
+        results = {"sharpe": 0.0, "turnover": 0.0, "fitness": 0.0, "fail_reasons":[]}
+        try:
+            page_text = page.inner_text("body")
+            
+            def extract_metric(metric_name, text):
+                pattern = rf'{metric_name}[^\d+-]*([+-]?\d+\.\d+)'
+                match = re.search(pattern, text, re.IGNORECASE)
+                if match:
+                    val = float(match.group(1))
+                    end_idx = match.end()
+                    if end_idx < len(text) and text[end_idx] == '%':
+                        val = val / 100.0
+                    return round(val, 4)
+                return 0.0
+
+            results["sharpe"] = extract_metric("Sharpe", page_text)
+            results["turnover"] = extract_metric("Turnover", page_text)
+            results["fitness"] = extract_metric("Fitness", page_text)
+            
+            # 提取官方拒签原因
+            fail_reasons =[]
+            for line in page_text.split('\n'):
+                line = line.strip()
+                if "below cutoff" in line or "above cutoff" in line or "Check failed" in line:
+                    fail_reasons.append(line)
+            results["fail_reasons"] = list(set(fail_reasons))
+            
+            logger.info(f"⚙️ 抓取成功: 夏普={results['sharpe']}, 拒签原因数={len(results['fail_reasons'])}")
+            
+        except Exception as e:
+            logger.warning(f"无法精准抓取指标数值: {str(e)}")
+
+        # 绝对不关闭浏览器！直接返回！
+        return {"simulation_results": results, "error_msg": None, "status": "simulated"}
+
+    except Exception as e:
+        logger.error(f"⚙️ Playwright 执行时出错: {str(e)}")
+        # 只有真正崩溃时才考虑记录错误
+        return {"error_msg": "页面崩溃或超时", "status": "error", "simulation_results": {}}
+```
+--------------------------------------------------
+
+文件位置：src/nodes/submit_node.py
+文件内容：
+```python
+from src.state import AlphaState
+from src.logger import logger
+
+
+def submit_alpha(state: AlphaState) -> dict:
+    expression = state.get("expression")
+    logger.info(f"🚀 [Node: Submitter] 正在提交达标因子到 WorldQuant Brain...")
+    logger.debug(f"Submitter: 尝试点击 Submit 按钮 (Mocking...): {expression}")
+
+    # 这里未来写入保存到本地 SQLite 或 CSV 的逻辑
+    logger.info(f"🚀 [Node: Submitter] 🎉 因子提交成功！")
+    # 同步返回关键信息，便于前端记录历史
+    return {
+        "status": "submitted",
+        "idea": state.get("idea"),
+        "expression": state.get("expression"),
+    }
+
+```
+--------------------------------------------------
+
+文件位置：src/nodes/idea_node.py
+文件内容：
+```python
+from src.state import AlphaState
+from src.llm import get_llm
+from src.logger import logger
+from src.db import get_random_near_miss
+
+
+def generate_idea(state: AlphaState) -> dict:
+    logger.info("💡 [Node: Idea] 正在生成因子灵感...")
+    llm = get_llm(temperature=0.8)  # 灵感阶段温度稍高
+    # 尝试从基因库中提取优秀基因进行变异；若无则新生成
+    near_miss = get_random_near_miss()
+    if near_miss:
+        logger.info(
+            f"🧬 发现优秀历史基因 (Sharpe: {near_miss['sharpe']})，开始进行交叉变异..."
+        )
+        prompt = f"""
+        你是一个顶级量化研究员。请对以下未及格但有潜力的因子逻辑进行【变异】或【进化】。
+        【原逻辑】: {near_miss["idea"]}
+        【原表达式】: {near_miss["expression"]}
+        请输出全新的变异思路，说明为什么新思路能提高夏普率。限制在100字以内。
+        """
+    else:
+        prompt = """你是一个顶级量化研究员。请构思一个新的量化因子逻辑，例如基于价量背离、均值回归。限制在100字以内。"""
+    response = llm.invoke(prompt)
+    content = getattr(response, "content", "")
+    if isinstance(content, str):
+        idea = content.strip()
+    elif isinstance(content, list):
+        idea = " ".join([str(p) for p in content]).strip()
+    else:
+        idea = str(content).strip()
+    logger.debug(f"生成的灵感: {idea}")
+    return {
+        "idea": idea,
+        "iteration_count": 0,
+        "status": "new",
+        "error_msg": None,
+        "feedback": "",
+    }
+
+```
+--------------------------------------------------
+
