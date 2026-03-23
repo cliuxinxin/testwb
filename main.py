@@ -1,4 +1,5 @@
 import time
+from src.config import get_settings
 from src.logger import logger
 from src.graph import build_graph
 
@@ -8,7 +9,7 @@ def main():
     logger.info("🤖 WorldQuant Brain 自动化因子挖掘系统启动")
     logger.info("=" * 50)
 
-    app = build_graph()
+    app = build_graph(get_settings())
 
     initial_state = {"iteration_count": 0, "status": "new"}
 

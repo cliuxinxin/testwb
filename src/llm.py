@@ -1,15 +1,19 @@
-import os
+from typing import Optional
+
 from langchain_openai import ChatOpenAI
+from src.config import Settings, get_settings
 from src.logger import logger
 
 
-def get_llm(temperature=0.7) -> ChatOpenAI:
-    # 动态从环境变量中获取（配合 Streamlit/外部控制面板）
-    api_base = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
-    api_key = os.getenv("OPENAI_API_KEY", "")
-    model = os.getenv("LLM_MODEL", "gpt-4o")
+def get_llm(temperature=0.7, settings: Optional[Settings] = None) -> ChatOpenAI:
+    current_settings = settings or get_settings()
 
-    logger.debug(f"初始化 LLM 客户端: Model={model}, Base={api_base}")
+    logger.debug(
+        f"初始化 LLM 客户端: Model={current_settings.model}, Base={current_settings.api_base}"
+    )
     return ChatOpenAI(
-        api_key=api_key, base_url=api_base, model=model, temperature=temperature
+        api_key=current_settings.api_key,
+        base_url=current_settings.api_base,
+        model=current_settings.model,
+        temperature=temperature,
     )

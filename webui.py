@@ -1,13 +1,13 @@
 import streamlit as st
-import os
 import time
+from src.config import Settings, get_settings
 from src.graph import build_graph
-from src.state import AlphaState
 
 # ==========================================
 # 1. 页面配置与状态初始化
 # ==========================================
 st.set_page_config(page_title="WQ Alpha 自动化挖掘系统", page_icon="📈", layout="wide")
+initial_settings = get_settings()
 
 if "alpha_history" not in st.session_state:
     st.session_state.alpha_history = []
@@ -20,25 +20,26 @@ if "is_running" not in st.session_state:
 with st.sidebar:
     st.title("⚙️ 系统配置")
 
-    # 动态覆盖环境变量，这样底层 src/llm.py 就能动态读取了
     api_base = st.text_input(
-        "API Base URL", value=os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
+        "API Base URL", value=initial_settings.api_base
     )
     api_key = st.text_input(
-        "API Key", value=os.getenv("OPENAI_API_KEY", ""), type="password"
+        "API Key", value=initial_settings.api_key, type="password"
     )
-    model = st.text_input("LLM Model", value=os.getenv("LLM_MODEL", "gpt-4o"))
+    model = st.text_input("LLM Model", value=initial_settings.model)
     max_iter = st.number_input(
         "最大迭代次数",
         min_value=1,
         max_value=10,
-        value=int(os.getenv("MAX_ITERATIONS", 4)),
+        value=initial_settings.max_iterations,
     )
 
-    os.environ["OPENAI_API_BASE"] = api_base
-    os.environ["OPENAI_API_KEY"] = api_key
-    os.environ["LLM_MODEL"] = model
-    os.environ["MAX_ITERATIONS"] = str(max_iter)
+    current_settings = Settings(
+        api_base=api_base,
+        api_key=api_key,
+        model=model,
+        max_iterations=int(max_iter),
+    )
 
     st.markdown("---")
     st.markdown("### 🛠️ 调试面板")
@@ -78,7 +79,7 @@ with tab_monitor:
 # 4. 核心逻辑：触发与流式渲染
 # ==========================================
 if start_btn:
-    if not os.getenv("OPENAI_API_KEY"):
+    if not current_settings.api_key:
         st.error("请在左侧栏输入 API Key！")
         st.stop()
 
@@ -91,7 +92,7 @@ if start_btn:
     log_placeholder.code("系统启动...\n", language="text")
 
     # 编译 LangGraph
-    app = build_graph()
+    app = build_graph(current_settings)
     initial_state = {"iteration_count": 0, "status": "new"}
 
     st.session_state.is_running = True
@@ -137,7 +138,7 @@ if start_btn:
                         )
 
                     if "feedback" in state_update and state_update["feedback"]:
-                        if state_update.get("status") == "passed":
+                        if state_update.get("status") in {"passed", "stored"}:
                             feedback_placeholder.success(state_update["feedback"])
                         elif state_update.get("status") == "error":
                             feedback_placeholder.error(state_update["feedback"])

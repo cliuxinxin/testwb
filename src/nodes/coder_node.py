@@ -1,38 +1,69 @@
 # src/nodes/coder_node.py
+from typing import Optional
+
+from src.config import Settings
 from src.state import AlphaState
 from src.llm import get_llm
 from src.logger import logger
-from src.whitelist import ALLOWED_OPERATORS, ALLOWED_DATASETS
+from src.db import format_history_snapshot, get_history_snapshot
+from src.whitelist import (
+    ALLOWED_COMPARATORS,
+    ALLOWED_DATASETS,
+    ALLOWED_GROUPS,
+    ALLOWED_OPERATORS,
+    CODER_METHOD_RULES_TEXT,
+    OPERATOR_MANUAL_TEXT,
+)
 
-def write_expression(state: AlphaState) -> dict:
+
+def write_expression(state: AlphaState, settings: Optional[Settings] = None) -> dict:
     iteration = state.get('iteration_count', 0)
     logger.info(f"💻 [Node: Coder] 正在编写/修复 WQ 表达式 (迭代: {iteration})...")
     
-    llm = get_llm(temperature=0.1)
+    llm = get_llm(temperature=0.1, settings=settings)
     idea = state.get("idea", "")
     feedback = state.get("feedback", "")
+    history_text = format_history_snapshot(get_history_snapshot())
+    attempted_expressions = state.get("attempted_expressions", [])
     
-    # 动态将列表转为字符串
     ops_str = ", ".join(ALLOWED_OPERATORS)
     data_str = ", ".join(ALLOWED_DATASETS)
+    groups_str = ", ".join(ALLOWED_GROUPS)
+    comparators_str = " ".join(ALLOWED_COMPARATORS)
+    attempted_expression_text = " || ".join(attempted_expressions[-5:]) if attempted_expressions else "无"
     
     prompt = f"""将以下因子逻辑写成 WorldQuant Brain 的单行表达式。
 【因子逻辑】: {idea}
 
-【极度严格的约束（违反任何一条直接淘汰）】:
-1. 只能使用以下基础数据: {data_str}
-2. 只能使用以下算子: {ops_str}
-3. 【绝对禁止】使用 Python 的 `and`, `or`, `if` 等关键字！如果需要多条件叠加，请用加减乘除。
-4. 【绝对禁止】使用抽象变量名（如 N, M, d）！计算周期必须是具体整数（如 5, 10, 20）。
-5. 【绝对禁止】使用科学计数法（如 1e-5），必须直接写完整小数（如 0.00001）。
-6. 不要加 Markdown 标记，直接输出一行纯净的代码。
-7. 【用法警告】如果使用 group_neutralize，第二个参数必须直接写分类数据（如 sector 或 industry）。正确示范：group_neutralize(rank(close), sector)。绝对禁止用数字1或[]，也绝对禁止写成 group=sector 这种 Python 传参格式！
-8. 【量纲一致性铁律】绝对禁止把常数（如 0.00001, 1）直接加减到带有量纲的原始数据（如 close, volume, vwap）上！例如 volume+0.00001 会直接导致 Incompatible unit 报错。"""
+【允许的基础数据】: {data_str}
+【允许的分组字段】: {groups_str}
+【允许的比较运算符】: {comparators_str}
+【允许的算子】: {ops_str}
+
+【历史经验与失败记录】:
+{history_text}
+
+【本轮已经尝试过的表达式（绝对禁止重复）】:
+{attempted_expression_text}
+
+【算子签名与使用手册】:
+{OPERATOR_MANUAL_TEXT}
+
+【强制写作规则】:
+{CODER_METHOD_RULES_TEXT}
+
+【最后输出要求】:
+1. 只输出一行纯净表达式。
+2. 不要输出解释、不要输出 Markdown、不要输出多行。
+3. 在输出前先自行检查每个算子的参数个数、参数顺序、group 参数和命名参数是否符合手册。
+4. 如果历史里有高频错误或最近失败样本，优先规避这些错误，不要重复犯错。
+5. 输出必须与本轮已尝试表达式结构明显不同，不能只改一个参数或换一个 group 字段后原样重写。
+"""
     if feedback:
         prompt += f"\n\n【前期测试反馈与报错】: \n{feedback}\n请仔细分析报错原因，严格遵守约束条件，修复此错误！"
 
     response = llm.invoke(prompt)
-    expression = response.content.strip().replace("`", "")
+    expression = str(response.content).strip().replace("`", "")
     
     logger.info(f"💻[Node: Coder] 生成表达式: {expression}")
     return {"expression": expression}
